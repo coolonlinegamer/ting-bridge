@@ -20,7 +20,11 @@ supported app through macOS Accessibility.
 | --- | --- | --- | --- |
 | Hold and release the main handle | Start and stop dictation | Hold and release dictation | Hold and release dictation |
 | Release the green button | Return / submit | Return / submit | Return / submit |
-| Orange button | Left to Ting's clean/effect selector | Same | Same |
+
+The orange button is intentionally not mapped: it cycles Ting's built-in voice
+effects (clean, echo, spring, pixie, robot). Leave it on the clean voice while
+dictating — the effects are fun, but speech recognition cannot understand a
+pixie.
 
 Safety boundaries are intentionally narrow:
 
@@ -32,19 +36,37 @@ Safety boundaries are intentionally narrow:
 
 ## Hardware setup
 
-The tested setup uses **two connections** between Ting and the Mac:
+### What you need
 
-1. **USB-C data and power:** connect Ting's rear USB-C port to the Mac. Ting
-   Bridge uses the resulting `/dev/cu.usbmodemEPTX*` serial device. In the
-   tested setup this also powers Ting, so batteries are not required.
-2. **Audio:** connect Ting's 3.5 mm audio output to a USB audio input adapter or
-   interface, then connect that adapter to the Mac. The adapter must accept an
-   analog microphone or line input; many inexpensive USB-C headphone dongles
-   are output-only and will not work.
+- a Teenage Engineering EP-2350 Ting;
+- a USB-C **data** cable (a charge-only cable will not expose Ting's controls);
+- a 3.5 mm-to-USB-C audio **input** adapter. The tested setup uses the
+  [Saramonic SR-C2003](https://www.amazon.com/dp/B08DTP7R8M), the adapter from
+  Robert Bye's original Ting-dictation setup that inspired this project. Any
+  adapter that accepts an analog microphone input works, but many inexpensive
+  USB-C headphone dongles are output-only and will not;
+- two free USB-C ports on the Mac, or a hub.
+
+### Connections
+
+The setup uses **two connections** between Ting and the Mac:
+
+1. **USB-C data and power:** connect Ting's USB-C port to the Mac. Ting Bridge
+   uses the resulting `/dev/cu.usbmodemEPTX*` serial device. USB also powers
+   Ting, so batteries are not required.
+2. **Audio:** connect Ting's 3.5 mm audio output to the input adapter, then
+   connect the adapter to the Mac.
 
 Choose the USB audio adapter under **System Settings > Sound > Input**. Ting's
 USB serial connection carries its controls, not the microphone audio used by
 Codex or Claude.
+
+> [!NOTE]
+> Ting's USB-C port sits under the lower battery lid, so the lid cannot be
+> refitted while the cable is attached and the assembled look suffers. Since
+> USB power makes batteries unnecessary, a committed desk setup could cut a
+> small cable pass-through in the lid. That modification is permanent, cosmetic
+> surgery is at your own risk, and it will not improve your warranty.
 
 ## Requirements
 
