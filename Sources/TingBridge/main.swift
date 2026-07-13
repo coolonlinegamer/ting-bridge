@@ -299,7 +299,15 @@ final class InputController {
     }
 
     private func startDictation() {
-        guard case .none = dictationSession else { return }
+        if case .codexPossiblyRecording = dictationSession,
+           !isCodexRunning() {
+            log("Clearing retained Codex recording state because Codex is no longer running")
+            clearDictationSession()
+        }
+        guard case .none = dictationSession else {
+            log("Ignoring handle because a prior dictation session still requires a verified release")
+            return
+        }
         guard let focused = SupportedApp.focused(), let app = focused.app else {
             let bundleID = SupportedApp.focused()?.bundleID ?? "unknown"
             log("Ignoring handle because focused app is unsupported: \(bundleID)")
@@ -403,6 +411,12 @@ final class InputController {
         dictationSession = .none
         claudeButtonPoint = nil
         savedMousePoint = nil
+    }
+
+    private func isCodexRunning() -> Bool {
+        !NSRunningApplication
+            .runningApplications(withBundleIdentifier: SupportedApp.codex.rawValue)
+            .isEmpty
     }
 
     private func codexDictationState(for label: String) -> CodexDictationState {
