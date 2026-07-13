@@ -9,7 +9,6 @@ let package = Package(
             name: "TingBridge",
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
-                .linkedFramework("CoreAudio"),
                 .linkedFramework("ApplicationServices"),
             ]
         )

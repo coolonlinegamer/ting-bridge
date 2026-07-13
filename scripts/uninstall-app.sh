@@ -19,5 +19,5 @@ tccutil reset Accessibility "${label}" >/dev/null 2>&1 || true
 
 printf 'Ting Bridge was removed.\n'
 printf 'The local signing identity was kept for stable reinstalls.\n'
-printf 'To remove it too, run:\n'
-printf '  security delete-identity -c %q\n' 'Ting Bridge Local Code Signing'
+printf 'To remove the identity and its local trust setting too, run:\n'
+printf '  security delete-identity -t -c %q %q\n' 'Ting Bridge Local Code Signing' "${HOME}/Library/Keychains/login.keychain-db"

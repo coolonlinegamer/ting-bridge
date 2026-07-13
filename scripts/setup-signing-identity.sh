@@ -35,16 +35,17 @@ archive="${temporary_directory}/identity.p12"
 archive_password="$("${openssl_command}" rand -hex 24)"
 
 printf 'Creating local signing identity: %s\n' "${identity}"
+printf 'This creates a three-year, non-CA certificate trusted only for local code signing.\n'
 "${openssl_command}" req \
   -x509 \
   -newkey rsa:3072 \
   -sha256 \
   -nodes \
-  -days 3650 \
+  -days 1095 \
   -subj "/CN=${identity}/O=Ting Bridge" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,digitalSignature,keyCertSign" \
-  -addext "extendedKeyUsage=codeSigning" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning" \
   -keyout "${private_key}" \
   -out "${certificate}" \
   >/dev/null 2>&1
