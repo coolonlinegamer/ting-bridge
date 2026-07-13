@@ -18,3 +18,5 @@ jobs:
         run: plutil -lint macos/*.plist
       - name: Build release executable
         run: swift build -c release
+      - name: Run regression checks
+        run: .build/release/TingBridge self-test

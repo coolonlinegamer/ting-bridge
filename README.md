@@ -28,7 +28,7 @@ Safety boundaries are intentionally narrow:
 - physical clicks are checked against the target application before posting;
 - no audio or dictated text is stored by Ting Bridge;
 - no network requests are made by Ting Bridge;
-- the event log records control transitions and diagnostics, not audio.
+- the event log records control transitions and diagnostics, not audio or prompt text.
 
 ## Hardware setup
 
@@ -81,11 +81,11 @@ Create the local signing identity once:
 ./scripts/setup-signing-identity.sh
 ```
 
-This creates a self-signed identity named `Ting Bridge Local Code Signing` in
-your login Keychain and trusts its certificate for the macOS `codeSign` policy.
-The private key remains in your Keychain. A stable identity is necessary
-because rebuilding an ad-hoc-signed Accessibility helper causes macOS to treat
-it as a different app.
+This creates a three-year self-signed **leaf** identity named `Ting Bridge
+Local Code Signing` in your login Keychain. It is not a certificate authority;
+the certificate is trusted only for the macOS `codeSign` policy. The private key
+remains in your Keychain. A stable identity is necessary because rebuilding an
+ad-hoc-signed Accessibility helper causes macOS to treat it as a different app.
 
 If you already have a suitable Apple Development or other code-signing
 identity, skip that script and provide its name when installing:
@@ -124,7 +124,7 @@ launchctl kickstart -k "gui/$(id -u)/com.bubblymagic.tingbridge"
 You should then see these lines in `~/Library/Logs/TingBridge.log`:
 
 ```text
-Connected to Ting at /dev/cu.usbmodemEPTXP2YH1
+Connected to Ting at /dev/cu.usbmodemEPTX…
 Ting controls ready
 ```
 
@@ -154,6 +154,13 @@ Check that Ting's serial device exists:
 ls /dev/cu.usbmodemEPTX*
 ```
 
+Run the no-hardware regression checks for serial selection and control-event
+deduplication:
+
+```bash
+swift run TingBridge self-test
+```
+
 Run an eight-second audio-level probe against the Mac's selected input:
 
 ```bash
@@ -166,6 +173,11 @@ binary:
 ```bash
 ~/Applications/Ting\ Bridge.app/Contents/MacOS/TingBridge ax-dump
 ```
+
+`ax-dump` writes diagnostics only to the terminal, never to `TingBridge.log`,
+and redacts accessibility value fields. The Claude selectors currently rely on
+English accessibility labels such as “Hold to record”; non-English app UI may
+need selector updates.
 
 ### Common problems
 
@@ -214,7 +226,8 @@ survive the update.
 The uninstaller stops and removes Ting Bridge, its LaunchAgent, logs, and its
 Accessibility grant. It intentionally leaves the local signing identity in the
 login Keychain so reinstalling remains stable. The script prints the optional
-Keychain command if you also want to delete that identity.
+Keychain command that deletes the identity and its local trust setting if you
+also want to remove both.
 
 ## How it works
 

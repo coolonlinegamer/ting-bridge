@@ -4,6 +4,69 @@ import AVFoundation
 import Darwin
 import Foundation
 
+enum TingControlEvent: Equatable {
+    case ready
+    case error(String)
+    case handle(Bool)
+    case green(Bool)
+}
+
+enum TingControlTransition: Equatable {
+    case handleChanged(isPressed: Bool)
+    case greenReleased
+}
+
+struct TingControlState {
+    private var handlePressed = false
+    private var greenPressed = false
+
+    mutating func transition(for event: TingControlEvent) -> TingControlTransition? {
+        switch event {
+        case let .handle(isPressed):
+            guard isPressed != handlePressed else { return nil }
+            handlePressed = isPressed
+            return .handleChanged(isPressed: isPressed)
+        case let .green(isPressed):
+            guard isPressed != greenPressed else { return nil }
+            greenPressed = isPressed
+            return isPressed ? nil : .greenReleased
+        case .ready, .error:
+            return nil
+        }
+    }
+}
+
+enum TingSerialProtocol {
+    static func devicePath(from names: [String]) -> String? {
+        names
+            .filter { $0.hasPrefix("cu.usbmodemEPTX") }
+            .sorted()
+            .first
+            .map { "/dev/\($0)" }
+    }
+
+    static func event(from line: String) -> TingControlEvent? {
+        let fields = line.split(separator: " ")
+        guard fields.count == 2 else { return nil }
+        switch (fields[0], fields[1]) {
+        case ("TING_READY", "1"):
+            return .ready
+        case ("TING_ERROR", let message):
+            return .error(String(message))
+        case ("TING_HANDLE", "0"):
+            return .handle(false)
+        case ("TING_HANDLE", "1"):
+            return .handle(true)
+        case ("TING_GREEN", "0"):
+            return .green(true)
+        case ("TING_GREEN", "1"):
+            return .green(false)
+        default:
+            return nil
+        }
+    }
+}
+
 enum AudioProbeError: Error, CustomStringConvertible {
     case noInputChannels
     case permissionDenied
@@ -178,7 +241,14 @@ enum SupportedApp: String {
 }
 
 final class InputController {
-    private var dictationApp: SupportedApp?
+    private enum DictationSession {
+        case none
+        case codexPossiblyRecording
+        case codexAlreadyRecording
+        case claude
+    }
+
+    private var dictationSession: DictationSession = .none
     private var claudeButtonPoint: CGPoint?
     private var savedMousePoint: CGPoint?
 
@@ -229,7 +299,7 @@ final class InputController {
     }
 
     private func startDictation() {
-        guard dictationApp == nil else { return }
+        guard case .none = dictationSession else { return }
         guard let focused = SupportedApp.focused(), let app = focused.app else {
             let bundleID = SupportedApp.focused()?.bundleID ?? "unknown"
             log("Ignoring handle because focused app is unsupported: \(bundleID)")
@@ -244,17 +314,17 @@ final class InputController {
             }
             switch codexDictationState(for: button.label) {
             case .recording:
-                dictationApp = .codex
+                dictationSession = .codexAlreadyRecording
                 log("Handle down -> Codex was already recording; leaving its control unchanged")
             case .idle:
                 guard clickPhysically(at: point, expectedApp: .codex) else { return }
+                dictationSession = .codexPossiblyRecording
                 usleep(300_000)
                 guard let current = findCodexDictationButton(pid: focused.pid),
                       codexDictationState(for: current.label) == .recording else {
-                    log("Handle down -> Codex start click was not confirmed; release will be a no-op")
+                    log("Handle down -> Codex start click was not confirmed; retaining possible recording state until stop is verified")
                     return
                 }
-                dictationApp = .codex
                 log("Handle down -> started Codex dictation and confirmed stop state")
             case .unknown:
                 log("Handle down -> refusing Codex click because dictation state is unknown: \(button.label)")
@@ -272,31 +342,45 @@ final class InputController {
             claudeButtonPoint = point
             postMouse(type: .mouseMoved, at: point)
             postMouse(type: .leftMouseDown, at: point)
-            dictationApp = .claude
+            dictationSession = .claude
             log("Handle down -> holding Claude dictation button")
         }
     }
 
     private func stopDictation() {
-        guard let app = dictationApp else { return }
-        switch app {
-        case .codex:
+        switch dictationSession {
+        case .none:
+            return
+        case .codexAlreadyRecording:
+            log("Handle up -> Codex was already recording before Ting Bridge acted; leaving it unchanged")
+            clearDictationSession()
+        case .codexPossiblyRecording:
             if let focused = SupportedApp.focused(),
                focused.app == .codex,
                let button = findCodexDictationButton(pid: focused.pid),
                let point = button.center {
                 switch codexDictationState(for: button.label) {
                 case .recording:
-                    if clickPhysically(at: point, expectedApp: .codex) {
-                        log("Handle up -> stopped Codex dictation from confirmed recording state")
+                    guard clickPhysically(at: point, expectedApp: .codex) else {
+                        log("Handle up -> could not safely click Codex; retaining possible recording state")
+                        return
                     }
+                    usleep(300_000)
+                    guard let current = findCodexDictationButton(pid: focused.pid),
+                          codexDictationState(for: current.label) == .idle else {
+                        log("Handle up -> Codex stop click was not confirmed; retaining possible recording state")
+                        return
+                    }
+                    log("Handle up -> stopped Codex dictation and confirmed idle state")
+                    clearDictationSession()
                 case .idle:
-                    log("Handle up -> Codex was already stopped; no click needed")
+                    log("Handle up -> Codex is confirmed idle")
+                    clearDictationSession()
                 case .unknown:
-                    log("Handle up -> refusing Codex click because dictation state is unknown: \(button.label)")
+                    log("Handle up -> refusing Codex click because dictation state is unknown; retaining possible recording state: \(button.label)")
                 }
             } else {
-                log("Handle up -> refused to click because Codex is no longer focused or its control is obscured")
+                log("Handle up -> refused to click because Codex is no longer focused or its control is obscured; retaining possible recording state")
             }
         case .claude:
             if let point = claudeButtonPoint {
@@ -311,8 +395,12 @@ final class InputController {
                 postMouse(type: .mouseMoved, at: point)
             }
             log("Handle up -> released Claude dictation button")
+            clearDictationSession()
         }
-        dictationApp = nil
+    }
+
+    private func clearDictationSession() {
+        dictationSession = .none
         claudeButtonPoint = nil
         savedMousePoint = nil
     }
@@ -496,21 +584,6 @@ final class InputController {
         return role == kAXTextAreaRole as String || role == kAXTextFieldRole as String
     }
 
-    private func isOrInsideTextEntry(_ element: AXUIElement) -> Bool {
-        var current = element
-        for _ in 0..<6 {
-            if isTextEntryRole(current) { return true }
-            var parent: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
-                  let parent,
-                  CFGetTypeID(parent) == AXUIElementGetTypeID() else {
-                return false
-            }
-            current = parent as! AXUIElement
-        }
-        return false
-    }
-
     private func focusedElement(pid: pid_t) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
@@ -591,7 +664,26 @@ final class InputController {
         }
     }
 
-    private func hitPointIsTextEntry(at point: CGPoint, pid: pid_t) -> Bool {
+    private func isSameOrDescendant(_ element: AXUIElement, of ancestor: AXUIElement) -> Bool {
+        var current = element
+        for _ in 0..<12 {
+            if CFEqual(current, ancestor) { return true }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent,
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else {
+                return false
+            }
+            current = parent as! AXUIElement
+        }
+        return false
+    }
+
+    private func hitPointIsInside(
+        _ expectedEntry: AXUIElement,
+        at point: CGPoint,
+        expectedApp: SupportedApp
+    ) -> Bool {
         let systemWide = AXUIElementCreateSystemWide()
         var target: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
@@ -604,22 +696,21 @@ final class InputController {
             return false
         }
         var actualPID: pid_t = 0
-        guard AXUIElementGetPid(target, &actualPID) == .success, actualPID == pid else {
+        guard AXUIElementGetPid(target, &actualPID) == .success,
+              let bundleID = NSRunningApplication(processIdentifier: actualPID)?.bundleIdentifier,
+              SupportedApp.matching(bundleID: bundleID) == expectedApp else {
             return false
         }
-        return isOrInsideTextEntry(target)
+        return isSameOrDescendant(target, of: expectedEntry)
     }
 
     // Home and code mode live in the same window, so hidden home-mode elements can
     // match label searches; only geometry (real size, on-window center) separates
     // the visible composer from stale views. Focus via AX first; a physical click
-    // is allowed only when the point under it hit-tests as a text entry, so a
-    // mis-aimed click can never activate the attach control.
+    // is allowed only when the point under it hit-tests inside that selected
+    // prompt, so a mis-aimed click can never activate another text field or
+    // the attach control.
     private func focusClaudePrompt(pid: pid_t) -> Bool {
-        if let focused = focusedElement(pid: pid), isOrInsideTextEntry(focused) {
-            log("Claude focus already on a text entry: \(summarize(focused))")
-            return true
-        }
         guard let window = focusedWindow(pid: pid), let windowFrame = frameOf(window) else {
             log("Claude focused window unavailable")
             return false
@@ -639,17 +730,22 @@ final class InputController {
             return false
         }
 
+        if let focused = focusedElement(pid: pid), isSameOrDescendant(focused, of: prompt.element) {
+            log("Claude focus already on the selected prompt: \(prompt.summary)")
+            return true
+        }
+
         AXUIElementSetAttributeValue(prompt.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         usleep(80_000)
         if let focused = focusedElement(pid: pid),
-           CFEqual(focused, prompt.element) || isOrInsideTextEntry(focused) {
+           isSameOrDescendant(focused, of: prompt.element) {
             log("Claude prompt focused via Accessibility: \(prompt.summary)")
             return true
         }
 
         let point = prompt.center
-        guard hitPointIsTextEntry(at: point, pid: pid) else {
-            log("Refusing Claude focus click: element under \(Int(point.x)),\(Int(point.y)) is not a text entry")
+        guard hitPointIsInside(prompt.element, at: point, expectedApp: .claude) else {
+            log("Refusing Claude focus click: element under \(Int(point.x)),\(Int(point.y)) is not inside the selected Claude prompt")
             return false
         }
         guard clickPhysically(at: point, expectedApp: .claude) else {
@@ -657,7 +753,7 @@ final class InputController {
             return false
         }
         usleep(80_000)
-        if let focused = focusedElement(pid: pid), isOrInsideTextEntry(focused) {
+        if let focused = focusedElement(pid: pid), isSameOrDescendant(focused, of: prompt.element) {
             log("Claude prompt focused via physical click: \(prompt.summary)")
             return true
         }
@@ -742,8 +838,7 @@ final class InputController {
 final class TingSerialBridge {
     private let controller: InputController
     private var lineBuffer = ""
-    private var lastHandlePressed = false
-    private var lastGreenPressed = false
+    private var controlState = TingControlState()
     private var serialProcess: Process?
 
     init(controller: InputController) {
@@ -773,8 +868,7 @@ final class TingSerialBridge {
     private func runSerialSessionIfAvailable() {
         guard let path = serialDevicePath() else { return }
         lineBuffer = ""
-        lastHandlePressed = false
-        lastGreenPressed = false
+        controlState = TingControlState()
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
@@ -817,34 +911,26 @@ final class TingSerialBridge {
     }
 
     private func process(line: String) {
-        let fields = line.split(separator: " ")
-        guard fields.count == 2 else {
+        guard let event = TingSerialProtocol.event(from: line) else {
             if line.contains("Traceback") || line.contains("Error") {
                 log("Ting REPL: \(line)")
             }
             return
         }
-        switch fields[0] {
-        case "TING_READY":
+        switch event {
+        case .ready:
             log("Ting controls ready")
-        case "TING_ERROR":
-            log("Ting serial error: \(fields[1])")
-        case "TING_HANDLE":
-            let pressed = fields[1] == "1"
-            if pressed != lastHandlePressed {
-                lastHandlePressed = pressed
-                controller.handleChanged(isPressed: pressed)
+        case let .error(message):
+            log("Ting serial error: \(message)")
+        case .handle, .green:
+            switch controlState.transition(for: event) {
+            case let .handleChanged(isPressed):
+                controller.handleChanged(isPressed: isPressed)
+            case .greenReleased:
+                controller.greenReleased()
+            case nil:
+                break
             }
-        case "TING_GREEN":
-            let pressed = fields[1] == "0"
-            if pressed != lastGreenPressed {
-                lastGreenPressed = pressed
-                if !pressed {
-                    controller.greenReleased()
-                }
-            }
-        default:
-            break
         }
     }
 
@@ -852,16 +938,7 @@ final class TingSerialBridge {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: "/dev") else {
             return nil
         }
-        return names
-            .filter { $0.hasPrefix("cu.usbmodem") }
-            .sorted()
-            .map { "/dev/\($0)" }
-            .first { $0.contains("cu.usbmodemEPTX") }
-            ?? names
-                .filter { $0.hasPrefix("cu.usbmodem") }
-                .sorted()
-                .map { "/dev/\($0)" }
-                .first
+        return TingSerialProtocol.devicePath(from: names)
     }
 
     private var pythonSerialReader: String {
@@ -946,16 +1023,21 @@ final class TingSerialBridge {
 }
 
 func runAXDump() {
+    func diagnostic(_ message: String) {
+        print("AXDUMP \(message)")
+        fflush(stdout)
+    }
+
     let trusted = AXIsProcessTrusted()
-    log("AXDUMP starting; process trusted=\(trusted)")
+    diagnostic("starting; process trusted=\(trusted)")
     guard trusted else {
-        log("AXDUMP aborted: this process is not trusted for Accessibility")
+        diagnostic("aborted: this process is not trusted for Accessibility")
         return
     }
     guard let claude = NSRunningApplication
         .runningApplications(withBundleIdentifier: SupportedApp.claude.rawValue)
         .first else {
-        log("AXDUMP aborted: Claude is not running")
+        diagnostic("aborted: Claude is not running")
         return
     }
     let pid = claude.processIdentifier
@@ -1010,7 +1092,7 @@ func runAXDump() {
         var rawValue: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &rawValue) == .success,
            let text = rawValue as? String, !text.isEmpty {
-            parts.append("value='\(text.prefix(60))'")
+            parts.append("value=redacted")
         }
         parts.append(frame(element))
         return parts.joined(separator: " ")
@@ -1020,9 +1102,9 @@ func runAXDump() {
     if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
        let focusedValue,
        CFGetTypeID(focusedValue) == AXUIElementGetTypeID() {
-        log("AXDUMP focused-element: \(describe(focusedValue as! AXUIElement))")
+        diagnostic("focused-element: \(describe(focusedValue as! AXUIElement))")
     } else {
-        log("AXDUMP focused-element: none reported")
+        diagnostic("focused-element: none reported")
     }
 
     var lineCount = 0
@@ -1035,7 +1117,7 @@ func runAXDump() {
         let hasLabel = description.contains("desc='") || description.contains("title='")
             || description.contains("id='") || description.contains("placeholder='")
         if alwaysShow || hasLabel {
-            log("AXDUMP \(String(repeating: ".", count: min(depth, 30))) \(description)")
+            diagnostic("\(String(repeating: ".", count: min(depth, 30))) \(description)")
             lineCount += 1
         }
         for child in children(element) {
@@ -1057,13 +1139,13 @@ func runAXDump() {
         }
         return (focusedWindowValue as! AXUIElement)
     }()
-    log("AXDUMP Claude pid=\(pid) windows=\(windows.count)")
+    diagnostic("Claude pid=\(pid) windows=\(windows.count)")
     for (index, window) in windows.enumerated() {
         let isFocused = focusedWindow.map { CFEqual($0, window) } ?? false
-        log("AXDUMP window[\(index)] focused=\(isFocused) \(describe(window))")
+        diagnostic("window[\(index)] focused=\(isFocused) \(describe(window))")
         walk(window, depth: 0)
     }
-    log("AXDUMP complete; \(lineCount) elements printed")
+    diagnostic("complete; \(lineCount) elements printed")
 }
 
 func log(_ message: String) {
@@ -1084,6 +1166,36 @@ func log(_ message: String) {
     } catch {
         // Terminal logging remains available if file logging fails.
     }
+}
+
+func runSelfTest() {
+    var controlState = TingControlState()
+    let checks: [(String, Bool)] = [
+        (
+            "rejects unrelated serial devices",
+            TingSerialProtocol.devicePath(from: ["cu.usbmodemArduino", "cu.usbmodem3DPrinter"]) == nil
+        ),
+        (
+            "selects the known Ting serial device",
+            TingSerialProtocol.devicePath(from: ["cu.usbmodemArduino", "cu.usbmodemEPTXZ9"])
+                == "/dev/cu.usbmodemEPTXZ9"
+        ),
+        ("parses known handle events", TingSerialProtocol.event(from: "TING_HANDLE 1") == .handle(true)),
+        ("rejects malformed control events", TingSerialProtocol.event(from: "TING_HANDLE 2") == nil),
+        ("emits initial handle transition", controlState.transition(for: .handle(true)) == .handleChanged(isPressed: true)),
+        ("suppresses duplicate handle transition", controlState.transition(for: .handle(true)) == nil),
+        ("ignores green press", controlState.transition(for: .green(true)) == nil),
+        ("emits green release", controlState.transition(for: .green(false)) == .greenReleased),
+        ("suppresses duplicate green release", controlState.transition(for: .green(false)) == nil),
+    ]
+
+    for (name, passed) in checks {
+        guard passed else {
+            fputs("SELF_TEST_FAILED: \(name)\n", stderr)
+            Foundation.exit(1)
+        }
+    }
+    print("SELF_TEST_OK")
 }
 
 func runBridge() -> Never {
@@ -1151,8 +1263,10 @@ struct TingBridgeCommand {
             runBridge()
         case "ax-dump":
             runAXDump()
+        case "self-test":
+            runSelfTest()
         default:
-            print("Usage: ting-bridge audio-probe [seconds] | run | ax-dump")
+            print("Usage: ting-bridge audio-probe [seconds] | run | ax-dump | self-test")
             Foundation.exit(2)
         }
     }
