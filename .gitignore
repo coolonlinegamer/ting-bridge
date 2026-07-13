@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+*.log
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.xcarchive
+DerivedData/
