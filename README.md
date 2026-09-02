@@ -3,7 +3,7 @@
 Ting Bridge is an unofficial macOS helper that turns the controls on the
 [Teenage Engineering EP-2350 Ting](https://teenage.engineering/guides/ep-2350)
 microphone into push-to-talk and send controls for the Codex and Claude desktop
-apps.
+apps, and for Claude Code running in iTerm2.
 
 It does not replace the audio connection and it does not install custom
 firmware. It reads Ting's controls over USB serial and operates the frontmost
@@ -16,10 +16,10 @@ supported app through macOS Accessibility.
 
 ## What it does
 
-| Ting control | Codex | Claude Home | Claude Code |
-| --- | --- | --- | --- |
-| Hold and release the main handle | Start and stop dictation | Hold and release dictation | Hold and release dictation |
-| Release the green button | Return / submit | Return / submit | Return / submit |
+| Ting control | Codex | Claude Home | Claude Code (desktop) | Claude Code (iTerm2) |
+| --- | --- | --- | --- | --- |
+| Hold and release the main handle | Start and stop dictation | Hold and release dictation | Hold and release dictation | Hold and release dictation |
+| Release the green button | Return / submit | Return / submit | Return / submit | Return / submit |
 
 The orange button is intentionally not mapped: it cycles Ting's built-in voice
 effects (clean, echo, spring, pixie, robot). Leave it on the clean voice while
@@ -28,11 +28,38 @@ pixie.
 
 Safety boundaries are intentionally narrow:
 
-- input is generated only while Codex or Claude is frontmost;
+- input is generated only while Codex, Claude, or iTerm2 is frontmost;
 - physical clicks are checked against the target application before posting;
 - no audio or dictated text is stored by Ting Bridge;
 - no network requests are made by Ting Bridge;
 - the event log records control transitions and diagnostics, not audio or prompt text.
+
+## Claude Code in iTerm2
+
+Claude Code's terminal voice mode is enabled with `/voice` and defaults to
+hold-to-talk on the spacebar. Because a terminal application receives stdin
+bytes rather than key events, Claude Code recognises a held spacebar from **key
+repeat**. A single synthetic key-down event fires once and never repeats, so it
+would only insert one space.
+
+Ting Bridge therefore posts the initial space key-down, then emulates key repeat
+with events flagged `keyboardEventAutorepeat` until the handle is released, and
+posts the matching key-up on release. Dictation and typing can be mixed in one
+prompt, and the green button submits.
+
+Two environment variables tune the emulated repeat, each clamped to 1-5000 ms:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TING_BRIDGE_SPACE_INITIAL_MS` | 30 | Delay before the first repeat |
+| `TING_BRIDGE_SPACE_REPEAT_MS` | 15 | Interval between repeats |
+
+The 15 ms default matches one macOS key-repeat unit, which is the fastest rate
+real hardware produces. A faster repeat makes Claude Code recognise the hold
+sooner, so dictation starts more quickly.
+
+Leave `voice.autoSubmit` off if you want to alternate between typing and
+dictating before submitting, which is what the green button is for.
 
 ## Hardware setup
 
@@ -71,6 +98,7 @@ Codex or Claude.
 ## Requirements
 
 - macOS 14 or newer
+- iTerm2, for the Claude Code terminal mapping
 - Swift 6 / Xcode Command Line Tools
 - Ting connected over USB-C data
 - a separate working audio-input path from Ting to macOS

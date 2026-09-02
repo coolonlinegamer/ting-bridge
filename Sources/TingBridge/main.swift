@@ -164,6 +164,7 @@ func probeAudio(seconds: Double) async throws {
 enum SupportedApp: String {
     case codex = "com.openai.codex"
     case claude = "com.anthropic.claudefordesktop"
+    case terminal = "com.googlecode.iterm2"
 
     struct FocusedInfo {
         let app: SupportedApp?
@@ -172,7 +173,7 @@ enum SupportedApp: String {
     }
 
     static func matching(bundleID: String) -> SupportedApp? {
-        [SupportedApp.codex, .claude].first {
+        [SupportedApp.codex, .claude, .terminal].first {
             bundleID == $0.rawValue || bundleID.hasPrefix($0.rawValue + ".")
         }
     }
@@ -240,17 +241,32 @@ enum SupportedApp: String {
     }
 }
 
+private func envMilliseconds(_ name: String, default fallback: Int) -> Int {
+    guard let raw = ProcessInfo.processInfo.environment[name],
+          let value = Int(raw),
+          value > 0,
+          value <= 5000 else {
+        return fallback
+    }
+    return value
+}
+
 final class InputController {
     private enum DictationSession {
         case none
         case codexPossiblyRecording
         case codexAlreadyRecording
         case claude
+        case terminal
     }
 
     private var dictationSession: DictationSession = .none
     private var claudeButtonPoint: CGPoint?
     private var savedMousePoint: CGPoint?
+    private var spaceRepeatTimer: DispatchSourceTimer?
+    private let spaceRepeatQueue = DispatchQueue(label: "com.bubblymagic.tingbridge.spacerepeat")
+    private static let spaceInitialDelay = envMilliseconds("TING_BRIDGE_SPACE_INITIAL_MS", default: 30)
+    private static let spaceRepeatInterval = envMilliseconds("TING_BRIDGE_SPACE_REPEAT_MS", default: 15)
 
     private enum CodexDictationState {
         case idle
@@ -291,6 +307,9 @@ final class InputController {
             usleep(50_000)
             postKey(keyCode: 36)
             log("Green -> Return sent to verified Claude prompt")
+        case .terminal:
+            postKey(keyCode: 36)
+            log("Green -> Return in terminal")
         }
     }
 
@@ -352,6 +371,11 @@ final class InputController {
             postMouse(type: .leftMouseDown, at: point)
             dictationSession = .claude
             log("Handle down -> holding Claude dictation button")
+        case .terminal:
+            postKey(keyCode: 49, autoRelease: false)
+            startSpaceRepeat()
+            dictationSession = .terminal
+            log("Handle down -> holding space in terminal")
         }
     }
 
@@ -404,10 +428,20 @@ final class InputController {
             }
             log("Handle up -> released Claude dictation button")
             clearDictationSession()
+        case .terminal:
+            stopSpaceRepeat()
+            postKey(keyCode: 49, keyDown: false)
+            if let focused = SupportedApp.focused(), focused.app != .terminal {
+                log("Handle up -> released space, but focus had moved to \(focused.bundleID)")
+            } else {
+                log("Handle up -> released space in terminal")
+            }
+            clearDictationSession()
         }
     }
 
     private func clearDictationSession() {
+        stopSpaceRepeat()
         dictationSession = .none
         claudeButtonPoint = nil
         savedMousePoint = nil
@@ -551,17 +585,41 @@ final class InputController {
         return SupportedApp.matching(bundleID: bundleID) == expectedApp
     }
 
+    private func startSpaceRepeat() {
+        spaceRepeatTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: spaceRepeatQueue)
+        timer.schedule(
+            deadline: .now() + .milliseconds(InputController.spaceInitialDelay),
+            repeating: .milliseconds(InputController.spaceRepeatInterval)
+        )
+        timer.setEventHandler {
+            self.postKey(keyCode: 49, autoRelease: false, autorepeat: true)
+        }
+        spaceRepeatTimer = timer
+        timer.resume()
+    }
+
+    private func stopSpaceRepeat() {
+        spaceRepeatTimer?.cancel()
+        spaceRepeatTimer = nil
+    }
+
     private func postKey(
         keyCode: CGKeyCode,
         keyDown: Bool = true,
-        flags: CGEventFlags = []
+        flags: CGEventFlags = [],
+        autoRelease: Bool = true,
+        autorepeat: Bool = false
     ) {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown) else {
             return
         }
         event.flags = flags
+        if autorepeat {
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        }
         event.post(tap: .cghidEventTap)
-        if keyDown && flags.isEmpty {
+        if keyDown && autoRelease && flags.isEmpty {
             usleep(20_000)
             CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)?.post(tap: .cghidEventTap)
         }
@@ -1240,7 +1298,7 @@ func runBridge() -> Never {
         Foundation.exit(3)
     }
 
-    log("Ting Bridge starting; allowed apps: Codex and Claude")
+    log("Ting Bridge starting; allowed apps: Codex, Claude and iTerm2")
     let controller = InputController()
     let bridge = TingSerialBridge(controller: controller)
 
