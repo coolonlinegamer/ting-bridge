@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AVFoundation
+import CoreAudio
 import Darwin
 import Foundation
 
@@ -251,6 +252,76 @@ private func envMilliseconds(_ name: String, default fallback: Int) -> Int {
     return value
 }
 
+// The Ting's analog out feeds a separate audio interface (the dock's mic input),
+// so dictation only hears it if that interface is the default input. macOS can
+// fall back to the built-in mic on redock, so re-select it on every handle press.
+enum DefaultInputSelector {
+    static let deviceName = ProcessInfo.processInfo.environment["TING_BRIDGE_INPUT_DEVICE"]
+        ?? "CalDigit Thunderbolt 3 Audio"
+
+    private static func address(_ selector: AudioObjectPropertySelector,
+                                scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+    }
+
+    private static func allDevices() -> [AudioDeviceID] {
+        var addr = address(kAudioHardwarePropertyDevices)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr else {
+            return []
+        }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else {
+            return []
+        }
+        return ids
+    }
+
+    private static func name(of id: AudioDeviceID) -> String? {
+        var addr = address(kAudioObjectPropertyName)
+        var name: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name) == noErr,
+              let value = name?.takeRetainedValue() else {
+            return nil
+        }
+        return value as String
+    }
+
+    private static func hasInput(_ id: AudioDeviceID) -> Bool {
+        var addr = address(kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeInput)
+        var size: UInt32 = 0
+        return AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr && size > 0
+    }
+
+    private static func currentDefault() -> AudioDeviceID? {
+        var addr = address(kAudioHardwarePropertyDefaultInputDevice)
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr else {
+            return nil
+        }
+        return id
+    }
+
+    static func ensureSelected() {
+        guard let target = allDevices().first(where: { hasInput($0) && name(of: $0) == deviceName }) else {
+            log("Input device \"\(deviceName)\" not found; leaving default input unchanged")
+            return
+        }
+        guard currentDefault() != target else { return }
+        var addr = address(kAudioHardwarePropertyDefaultInputDevice)
+        var id = target
+        let status = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
+                                                UInt32(MemoryLayout<AudioDeviceID>.size), &id)
+        if status == noErr {
+            log("Default input switched to \"\(deviceName)\"")
+        } else {
+            log("Failed to set default input to \"\(deviceName)\" (OSStatus \(status))")
+        }
+    }
+}
+
 final class InputController {
     private enum DictationSession {
         case none
@@ -282,6 +353,7 @@ final class InputController {
 
     func handleChanged(isPressed: Bool) {
         if isPressed {
+            DefaultInputSelector.ensureSelected()
             startDictation()
         } else {
             stopDictation()
