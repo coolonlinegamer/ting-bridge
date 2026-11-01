@@ -334,6 +334,7 @@ final class InputController {
     private var dictationSession: DictationSession = .none
     private var claudeButtonPoint: CGPoint?
     private var savedMousePoint: CGPoint?
+    private var loggedClaudeButtons = false
     private var spaceRepeatTimer: DispatchSourceTimer?
     private let spaceRepeatQueue = DispatchQueue(label: "com.bubblymagic.tingbridge.spacerepeat")
     private static let spaceInitialDelay = envMilliseconds("TING_BRIDGE_SPACE_INITIAL_MS", default: 30)
@@ -708,7 +709,13 @@ final class InputController {
 
     private func findClaudeDictationButtonCenter(pid: pid_t) -> CGPoint? {
         guard let root = focusedWindow(pid: pid) else { return nil }
-        guard let point = findButton(in: root, depth: 0) else { return nil }
+        guard let point = findButton(in: root, depth: 0) else {
+            if !loggedClaudeButtons {
+                loggedClaudeButtons = true
+                logButtons(in: root)
+            }
+            return nil
+        }
         if let windowFrame = frameOf(root), !windowFrame.contains(point) {
             log("Ignoring off-window 'hold to record' element at \(Int(point.x)),\(Int(point.y))")
             return nil
@@ -907,21 +914,25 @@ final class InputController {
 
     private func focusedWindow(pid: pid_t) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
+        // Electron keeps its web content out of the AX tree until a client asks for it.
+        AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        let result = AXUIElementCopyAttributeValue(
             application,
             kAXFocusedWindowAttribute as CFString,
             &value
-        ) == .success,
+        )
+        guard result == .success,
         let value,
         CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            log("Focused window lookup failed for pid \(pid): AXError \(result.rawValue), trusted=\(AXIsProcessTrusted())")
             return nil
         }
         return (value as! AXUIElement)
     }
 
     private func findButton(in element: AXUIElement, depth: Int) -> CGPoint? {
-        guard depth < 30 else { return nil }
+        guard depth < 80 else { return nil }
 
         let description = copyStringAttribute(element, kAXDescriptionAttribute as CFString) ?? ""
         let title = copyStringAttribute(element, kAXTitleAttribute as CFString) ?? ""
@@ -939,6 +950,22 @@ final class InputController {
             }
         }
         return nil
+    }
+
+    private func logButtons(in element: AXUIElement, depth: Int = 0) {
+        guard depth < 80 else {
+            log("Claude button search hit depth limit")
+            return
+        }
+        let role = copyStringAttribute(element, kAXRoleAttribute as CFString) ?? ""
+        let labelled = !(copyStringAttribute(element, kAXDescriptionAttribute as CFString) ?? "").isEmpty ||
+            !(copyStringAttribute(element, kAXTitleAttribute as CFString) ?? "").isEmpty
+        if role == kAXButtonRole as String || (labelled && (frameOf(element)?.minY ?? 0) > 700) {
+            log("Claude button d\(depth): \(summarize(element))")
+        }
+        for child in copyElementsAttribute(element, kAXChildrenAttribute as CFString) ?? [] {
+            logButtons(in: child, depth: depth + 1)
+        }
     }
 
     private func center(of element: AXUIElement) -> CGPoint? {
